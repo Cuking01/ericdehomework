@@ -2,6 +2,7 @@
 #include <string.h>
 #include <immintrin.h>
 #include <xmmintrin.h>
+#include <stdio.h>
 //#pragma GCC optimize("O2")
 
 const char* sgemm_desc = "Simple blocked sgemm.";
@@ -61,6 +62,8 @@ struct ymm
         x=_mm256_load_ps(p);
     }
 
+    ymm(__m256 x):x(x){}
+
     ymm()
     {
         x=_mm256_setzero_ps();
@@ -76,7 +79,7 @@ struct ymm
         _mm256_store_ps(p,x);
     }
 
-    float sum() const
+    float sum1() const
     {
         alignas(32) float a[8];
         store(a);
@@ -84,21 +87,29 @@ struct ymm
         s=((a[0]+a[1])+(a[2]+a[3]))+((a[4]+a[5])+(a[6]+a[7]));
         return s;
     }
+
+    float sum2() const
+    {
+        ymm t=_mm256_permute2f128_ps(x,x,0x11);
+        t=_mm256_add_ps(t,x);
+        ymm t2=_mm256_movehdup_ps(t);
+        t=_mm256_add_ps(t,t2);
+        t2=_mm256_permute_ps(t,0xa);
+        t=_mm256_add_ps(t,t2);
+        return _mm256_cvtss_f32(t);
+    }
+
+    float sum() const
+    {
+        return sum2();
+    }
 };
+
 void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
 
     Mat a=convert_mem_layout_A(A,mem[0],M,K);
     Mat b=convert_mem_layout_B(B,mem[1],K,N);
     Mat c={C,N,M,N,M};
-
-    // for(int i=0;i<a.n;i++)
-    //     for(int j=0;j<b.n;j++)
-    //     {
-    //         float tmp=0;
-    //         for(int k=0;k<a.m;k++)
-    //             tmp+=a[i,k]*b[j,k];
-    //         c[j,i]=tmp;
-    //     }
 
     int i;
     for(i=0;i+1<a.n;i+=2)
@@ -111,12 +122,20 @@ void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
 
             for(int k=0;k<a.M;k+=8)
             {
-                ymm a0(&a[i+0,k]);
-                ymm a1(&a[i+1,k]);
                 ymm b0(&b[j+0,k]);
                 ymm b1(&b[j+1,k]);
                 ymm b2(&b[j+2,k]);
                 ymm b3(&b[j+3,k]);
+                ymm a0(&a[i+0,k]);
+                ymm a1(&a[i+1,k]);
+
+                if((k&8)==0)
+                {
+                    _mm_prefetch(&b[j+0,k+16],_MM_HINT_T0);
+                    _mm_prefetch(&b[j+1,k+16],_MM_HINT_T0);
+                    _mm_prefetch(&b[j+2,k+16],_MM_HINT_T0);
+                    _mm_prefetch(&b[j+3,k+16],_MM_HINT_T0);
+                }
 
                 c00.fma(a0,b0);
                 c01.fma(a0,b1);
