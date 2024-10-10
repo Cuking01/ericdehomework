@@ -155,6 +155,16 @@ void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
             c[j+1,i+1]+=c11.sum();
             c[j+2,i+1]+=c12.sum();
             c[j+3,i+1]+=c13.sum();
+
+            // ymm t0=_mm256_permute2f128_ps(c00,c10,0x20);
+            // ymm t1=_mm256_permute2f128_ps(c01,c11,0x20);
+            // ymm t2=_mm256_permute2f128_ps(c02,c12,0x20);
+            // ymm t3=_mm256_permute2f128_ps(c03,c13,0x20);
+            // ymm t4=_mm256_permute2f128_ps(c00,c10,0x31);
+            // ymm t5=_mm256_permute2f128_ps(c01,c11,0x31);
+            // ymm t6=_mm256_permute2f128_ps(c02,c12,0x31);
+            // ymm t7=_mm256_permute2f128_ps(c03,c13,0x31);
+            // c00=_mm256_permute_ps(t0,0x)
         }
 
         for(;j<b.n;j++)
