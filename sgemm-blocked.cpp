@@ -3,11 +3,13 @@
 #include <immintrin.h>
 #include <xmmintrin.h>
 #include <stdio.h>
+#include <atomic>
+#include <thread>
 //#pragma GCC optimize("O2")
 
 const char* sgemm_desc = "Simple blocked sgemm.";
 
-alignas(64) float mem[2][2000000];
+alignas(64) float mem[2][2000016];
 
 struct Mat
 {
@@ -56,6 +58,10 @@ struct ymm
     {
         return x;
     }
+    operator __m256d() const
+    {
+        return *(__m256d*)&(this->x);
+    }
 
     ymm(const float*p)
     {
@@ -63,6 +69,7 @@ struct ymm
     }
 
     ymm(__m256 x):x(x){}
+    ymm(__m256d x):x(*(__m256*)&x){}
 
     ymm()
     {
@@ -103,90 +110,162 @@ struct ymm
     {
         return sum2();
     }
+
+    void print() const
+    {
+        alignas(32) float a[8];
+        store(a);
+        for(int i=0;i<8;i++)
+            printf("%f ",a[i]);
+        puts("");
+    }
 };
 
-void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
-
-    Mat a=convert_mem_layout_A(A,mem[0],M,K);
-    Mat b=convert_mem_layout_B(B,mem[1],K,N);
-    Mat c={C,N,M,N,M};
-
+void custom_sgemm_sc(Mat a,Mat b,Mat c,int al=0,int ar=-1)
+{
+    if(ar==-1)ar=a.n;
     int i;
-    for(i=0;i+1<a.n;i+=2)
+
+    for(i=al;i+3<ar;i+=4)
     {
         int j;
-        for(j=0;j+3<b.n;j+=4)
+        for(j=0;j+1<b.n;j+=2)
         {
-            ymm c00,c01,c02,c03;
-            ymm c10,c11,c12,c13;
+            ymm c00,c10,c20,c30;
+            ymm c01,c11,c21,c31;
 
+            //这里必须预取不然后面读c延迟会特别高。
+            _mm_prefetch(&c[j+0,i],_MM_HINT_T0);
+            _mm_prefetch(&c[j+1,i],_MM_HINT_T0);
+
+            _mm_prefetch(&b[j+0,16],_MM_HINT_T0);
+            _mm_prefetch(&b[j+1,16],_MM_HINT_T0);
+            
             for(int k=0;k<a.M;k+=8)
             {
                 ymm b0(&b[j+0,k]);
                 ymm b1(&b[j+1,k]);
-                ymm b2(&b[j+2,k]);
-                ymm b3(&b[j+3,k]);
                 ymm a0(&a[i+0,k]);
                 ymm a1(&a[i+1,k]);
+                ymm a2(&a[i+2,k]);
+                ymm a3(&a[i+3,k]);
 
-                if((k&8)==0)
-                {
-                    _mm_prefetch(&b[j+0,k+16],_MM_HINT_T0);
-                    _mm_prefetch(&b[j+1,k+16],_MM_HINT_T0);
-                    _mm_prefetch(&b[j+2,k+16],_MM_HINT_T0);
-                    _mm_prefetch(&b[j+3,k+16],_MM_HINT_T0);
-                }
+                _mm_prefetch(&b[j+2,k],_MM_HINT_T0);
+                _mm_prefetch(&b[j+3,k],_MM_HINT_T0);
 
                 c00.fma(a0,b0);
                 c01.fma(a0,b1);
-                c02.fma(a0,b2);
-                c03.fma(a0,b3);
                 c10.fma(a1,b0);
                 c11.fma(a1,b1);
-                c12.fma(a1,b2);
-                c13.fma(a1,b3);
+                c20.fma(a2,b0);
+                c21.fma(a2,b1);
+                c30.fma(a3,b0);
+                c31.fma(a3,b1);
             }
 
-            c[j+0,i+0]+=c00.sum();
-            c[j+1,i+0]+=c01.sum();
-            c[j+2,i+0]+=c02.sum();
-            c[j+3,i+0]+=c03.sum();
-            c[j+0,i+1]+=c10.sum();
-            c[j+1,i+1]+=c11.sum();
-            c[j+2,i+1]+=c12.sum();
-            c[j+3,i+1]+=c13.sum();
 
-            // ymm t0=_mm256_permute2f128_ps(c00,c10,0x20);
-            // ymm t1=_mm256_permute2f128_ps(c01,c11,0x20);
-            // ymm t2=_mm256_permute2f128_ps(c02,c12,0x20);
-            // ymm t3=_mm256_permute2f128_ps(c03,c13,0x20);
-            // ymm t4=_mm256_permute2f128_ps(c00,c10,0x31);
-            // ymm t5=_mm256_permute2f128_ps(c01,c11,0x31);
-            // ymm t6=_mm256_permute2f128_ps(c02,c12,0x31);
-            // ymm t7=_mm256_permute2f128_ps(c03,c13,0x31);
-            // c00=_mm256_permute_ps(t0,0x)
+            //对每个ymm内部求和
+            // c[j+0,i+0]+=c00.sum();
+            // c[j+0,i+1]+=c10.sum();
+            // c[j+0,i+2]+=c20.sum();
+            // c[j+0,i+3]+=c30.sum();
+            // c[j+1,i+0]+=c01.sum();
+            // c[j+1,i+1]+=c11.sum();
+            // c[j+1,i+2]+=c21.sum();
+            // c[j+1,i+3]+=c31.sum();
+
+            //上面注释代码的高效实现：转置再直接求和直接写入：
+            ymm t0=_mm256_permute2f128_ps(c00,c01,0x20);
+            ymm t1=_mm256_permute2f128_ps(c10,c11,0x20);
+            ymm t2=_mm256_permute2f128_ps(c20,c21,0x20);
+            ymm t3=_mm256_permute2f128_ps(c30,c31,0x20);
+            ymm t4=_mm256_permute2f128_ps(c00,c01,0x31);
+            ymm t5=_mm256_permute2f128_ps(c10,c11,0x31);
+            ymm t6=_mm256_permute2f128_ps(c20,c21,0x31);
+            ymm t7=_mm256_permute2f128_ps(c30,c31,0x31);
+            
+            c00=_mm256_unpacklo_pd(t0,t2);
+            c10=_mm256_unpacklo_pd(t1,t3);
+            c20=_mm256_unpackhi_pd(t0,t2);
+            c30=_mm256_unpackhi_pd(t1,t3);
+            c01=_mm256_unpacklo_pd(t4,t6);
+            c11=_mm256_unpacklo_pd(t5,t7);
+            c21=_mm256_unpackhi_pd(t4,t6);
+            c31=_mm256_unpackhi_pd(t5,t7);
+
+            c00=_mm256_shuffle_ps(c00,c00,0xd8);
+            c10=_mm256_shuffle_ps(c10,c10,0xd8);
+            c20=_mm256_shuffle_ps(c20,c20,0xd8);
+            c30=_mm256_shuffle_ps(c30,c30,0xd8);
+            c01=_mm256_shuffle_ps(c01,c01,0xd8);
+            c11=_mm256_shuffle_ps(c11,c11,0xd8);
+            c21=_mm256_shuffle_ps(c21,c21,0xd8);
+            c31=_mm256_shuffle_ps(c31,c31,0xd8);
+
+            t0=_mm256_unpacklo_ps(c00,c10);
+            t1=_mm256_unpackhi_ps(c00,c10);
+            t2=_mm256_unpacklo_ps(c20,c30);
+            t3=_mm256_unpackhi_ps(c20,c30);
+            t4=_mm256_unpacklo_ps(c01,c11);
+            t5=_mm256_unpackhi_ps(c01,c11);
+            t6=_mm256_unpacklo_ps(c21,c31);
+            t7=_mm256_unpackhi_ps(c21,c31);
+
+
+            c00=ymm(&c[j+0,i&(~0x7)]);
+            c01=ymm(&c[j+1,i&(~0x7)]);
+
+            t0=_mm256_add_ps(t0,t1);
+            t2=_mm256_add_ps(t2,t3);
+            t4=_mm256_add_ps(t4,t5);
+            t6=_mm256_add_ps(t6,t7);
+            t0=_mm256_add_ps(t0,t2);
+            t4=_mm256_add_ps(t4,t6);
+            t0=_mm256_add_ps(t0,t4);
+
+            if(i&4)
+            {
+                c00=_mm256_add_ps(c00,_mm256_permute2f128_ps(t0,t0,i&4?0x08:0x80));
+                c01=_mm256_add_ps(c01,_mm256_permute2f128_ps(t0,t0,i&4?0x18:0x81));
+            }
+            else
+            {
+                c00=_mm256_add_ps(c00,_mm256_permute2f128_ps(t0,t0,i&4?0x08:0x80));
+                c01=_mm256_add_ps(c01,_mm256_permute2f128_ps(t0,t0,i&4?0x18:0x81));
+            }
+            
+            _mm256_store_ps(&c[j+0,i&(~7)],c00);
+            _mm256_store_ps(&c[j+1,i&(~7)],c01);
         }
 
         for(;j<b.n;j++)
         {
-            ymm c00,c10;
+            ymm c00,c10,c20,c30;
 
             for(int k=0;k<a.M;k+=8)
             {
                 ymm a0(&a[i+0,k]);
                 ymm a1(&a[i+1,k]);
+                ymm a2(&a[i+2,k]);
+                ymm a3(&a[i+3,k]);
                 ymm b0(&b[j+0,k]);
 
                 c00.fma(a0,b0);
                 c10.fma(a1,b0);
+                c20.fma(a2,b0);
+                c30.fma(a3,b0);
             }
 
             c[j+0,i+0]+=c00.sum();
             c[j+0,i+1]+=c10.sum();
+            c[j+0,i+2]+=c20.sum();
+            c[j+0,i+3]+=c30.sum();
         }
+
+
     }
 
-    for(;i<a.n;i++)
+    for(;i<ar;i++)
     {
         int j;
         for(j=0;j<b.n;j++)
@@ -203,4 +282,48 @@ void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
             c[j+0,i+0]+=c00.sum();
         }
     }
+}
+
+void custom_sgemm_mc(Mat a,Mat b,Mat c,int thread_num)
+{
+    std::atomic<int> cnt=thread_num;
+
+    static constexpr int align=16;
+    int wide=a.n/(align*thread_num)*align;
+
+    auto work_thread=[&cnt,a,b,c](int al,int ar)
+    {
+        custom_sgemm_sc(a,b,c,al,ar);
+        cnt--;
+    };
+
+    for(int i=0;i<thread_num;i++)
+    {
+        int r=(i+1)*wide;
+        if(i==thread_num-1)r=a.n;
+        std::thread(work_thread,i*wide,r).detach();
+    }
+
+    while(cnt)
+    {
+        __asm__ volatile ("nop");
+        __asm__ volatile ("nop");
+        __asm__ volatile ("nop");
+        __asm__ volatile ("nop");
+        __asm__ volatile ("nop");
+        __asm__ volatile ("nop");
+        __asm__ volatile ("nop");
+        __asm__ volatile ("nop");
+    }
+    
+}
+
+void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
+
+    Mat a=convert_mem_layout_A(A,mem[0],M,K);
+    Mat b=convert_mem_layout_B(B,mem[1],K,N);
+    Mat c={C,N,M,N,M};
+
+    custom_sgemm_mc(a,b,c,2);
+    //custom_sgemm_sc(a,b,c);
 }
