@@ -324,6 +324,6 @@ void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
     Mat b=convert_mem_layout_B(B,mem[1],K,N);
     Mat c={C,N,M,N,M};
 
-    custom_sgemm_mc(a,b,c,2);
-    //custom_sgemm_sc(a,b,c);
+    //custom_sgemm_mc(a,b,c,2);
+    custom_sgemm_sc(a,b,c);
 }
