@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <atomic>
 #include <thread>
+#include <condition_variable>
+#include <vector>
+
 //#pragma GCC optimize("O2")
 
 const char* sgemm_desc = "Simple blocked sgemm.";
@@ -121,12 +124,11 @@ struct ymm
     }
 };
 
-void custom_sgemm_sc(Mat a,Mat b,Mat c,int al=0,int ar=-1)
+void custom_sgemm_sc(Mat a,Mat b,Mat c)
 {
-    if(ar==-1)ar=a.n;
     int i;
 
-    for(i=al;i+3<ar;i+=4)
+    for(i=0;i+3<a.n;i+=4)
     {
         int j;
         for(j=0;j+1<b.n;j+=2)
@@ -265,7 +267,7 @@ void custom_sgemm_sc(Mat a,Mat b,Mat c,int al=0,int ar=-1)
 
     }
 
-    for(;i<ar;i++)
+    for(;i<a.n;i++)
     {
         int j;
         for(j=0;j<b.n;j++)
@@ -284,39 +286,6 @@ void custom_sgemm_sc(Mat a,Mat b,Mat c,int al=0,int ar=-1)
     }
 }
 
-void custom_sgemm_mc(Mat a,Mat b,Mat c,int thread_num)
-{
-    std::atomic<int> cnt=thread_num;
-
-    static constexpr int align=16;
-    int wide=a.n/(align*thread_num)*align;
-
-    auto work_thread=[&cnt,a,b,c](int al,int ar)
-    {
-        custom_sgemm_sc(a,b,c,al,ar);
-        cnt--;
-    };
-
-    for(int i=0;i<thread_num;i++)
-    {
-        int r=(i+1)*wide;
-        if(i==thread_num-1)r=a.n;
-        std::thread(work_thread,i*wide,r).detach();
-    }
-
-    while(cnt)
-    {
-        __asm__ volatile ("nop");
-        __asm__ volatile ("nop");
-        __asm__ volatile ("nop");
-        __asm__ volatile ("nop");
-        __asm__ volatile ("nop");
-        __asm__ volatile ("nop");
-        __asm__ volatile ("nop");
-        __asm__ volatile ("nop");
-    }
-    
-}
 
 void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
 
@@ -324,6 +293,5 @@ void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
     Mat b=convert_mem_layout_B(B,mem[1],K,N);
     Mat c={C,N,M,N,M};
 
-    custom_sgemm_mc(a,b,c,2);
-    //custom_sgemm_sc(a,b,c);
+    custom_sgemm_sc(a,b,c);
 }
