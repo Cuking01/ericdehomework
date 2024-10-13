@@ -26,34 +26,6 @@ struct Mat
     }
 };
 
-Mat convert_mem_layout_A(const float*s,float*t,int n,int m)
-{
-    int N=n;
-    int M=(((m+15)/16)|1)*16;
-
-    memset(t,0,N*M*4);
-
-    for(int i=0;i<n;i++)
-        for(int j=0;j<m;j++)
-            t[i*M+j]=s[i+n*j];
-
-    return {t,N,M,n,m};
-}
-
-Mat convert_mem_layout_B(const float*s,float*t,int n,int m)
-{
-    int N=m;
-    int M=(((n+15)/16)|1)*16;
-
-    memset(t,0,N*M*4);
-
-    for(int i=0;i<n;i++)
-        for(int j=0;j<m;j++)
-            t[i+j*M]=s[i+n*j];
-
-    return {t,N,M,m,n};
-}
-
 struct ymm
 {
     __m256 x;
@@ -123,6 +95,186 @@ struct ymm
         puts("");
     }
 };
+
+static constexpr int Align_Wide=16;
+
+Mat convert_mem_layout_A(const float*s,float*t,int n,int m)
+{
+    printf("<%d %d>\n",n,m);
+    int N=(n+7)/8*8;
+    int M=(((m+Align_Wide-1)/Align_Wide)|1)*Align_Wide;
+
+    for(int j=0;j<m;j++)
+    {
+        memcpy(t+j*N,s+j*n,n*4);
+        memset(t+j*N+n,0,N-n);
+    }
+    memset(t+m*N,0,(M-m)*N*4);
+
+    for(int i=0;i<N*M;i++)
+        printf("%3.0f ",t[i]);
+    puts("****");
+
+    printf("<%d %d\n>",n,m);
+    printf("<<N%d M%d>>\n",N,M);
+    for(int i=0;i<m;i++)
+    {
+        for(int j=0;j<n;j++)
+            printf("%3.0f ",a[i,j]);
+        puts("");
+    }
+
+    for(int i=0;i<M;i+=8)
+    {
+        int J;
+        if(M==8)J=N-8;
+        else J=i*(N/8-1)/(M/8-1);
+
+        for(int j=0;j<=J;j+=8)
+        {
+            float*p=t+i*N+j;
+
+            ymm a0(p+0*N);
+            ymm a1(p+1*N);
+            ymm a2(p+2*N);
+            ymm a3(p+3*N);
+            ymm a4(p+4*N);
+            ymm a5(p+5*N);
+            ymm a6(p+6*N);
+            ymm a7(p+7*N);
+
+            ymm t0=_mm256_permute2f128_ps(a0,a4,0x20);
+            ymm t1=_mm256_permute2f128_ps(a1,a5,0x20);
+            ymm t2=_mm256_permute2f128_ps(a2,a6,0x20);
+            ymm t3=_mm256_permute2f128_ps(a3,a7,0x20);
+            ymm t4=_mm256_permute2f128_ps(a0,a4,0x31);
+            ymm t5=_mm256_permute2f128_ps(a1,a5,0x31);
+            ymm t6=_mm256_permute2f128_ps(a2,a6,0x31);
+            ymm t7=_mm256_permute2f128_ps(a3,a7,0x31);
+            
+            a0=_mm256_unpacklo_pd(t0,t2);
+            a1=_mm256_unpacklo_pd(t1,t3);
+            a2=_mm256_unpackhi_pd(t0,t2);
+            a3=_mm256_unpackhi_pd(t1,t3);
+            a4=_mm256_unpacklo_pd(t4,t6);
+            a5=_mm256_unpacklo_pd(t5,t7);
+            a6=_mm256_unpackhi_pd(t4,t6);
+            a7=_mm256_unpackhi_pd(t5,t7);
+
+            a0=_mm256_shuffle_ps(a0,a0,0xd8);
+            a1=_mm256_shuffle_ps(a1,a1,0xd8);
+            a2=_mm256_shuffle_ps(a2,a2,0xd8);
+            a3=_mm256_shuffle_ps(a3,a3,0xd8);
+            a4=_mm256_shuffle_ps(a4,a4,0xd8);
+            a5=_mm256_shuffle_ps(a5,a5,0xd8);
+            a6=_mm256_shuffle_ps(a6,a6,0xd8);
+            a7=_mm256_shuffle_ps(a7,a7,0xd8);
+
+            t0=_mm256_unpacklo_ps(a0,a1);
+            t1=_mm256_unpackhi_ps(a0,a1);
+            t2=_mm256_unpacklo_ps(a2,a3);
+            t3=_mm256_unpackhi_ps(a2,a3);
+            t4=_mm256_unpacklo_ps(a4,a5);
+            t5=_mm256_unpackhi_ps(a4,a5);
+            t6=_mm256_unpacklo_ps(a6,a7);
+            t7=_mm256_unpackhi_ps(a6,a7);
+
+            a.M=M;
+
+            a0=ymm(&a[j+0,i]);
+            a1=ymm(&a[j+1,i]);
+            a2=ymm(&a[j+2,i]);
+            a3=ymm(&a[j+3,i]);
+            a4=ymm(&a[j+4,i]);
+            a5=ymm(&a[j+5,i]);
+            a6=ymm(&a[j+6,i]);
+            a7=ymm(&a[j+7,i]);
+
+            puts("&&&&");
+            a0.print();
+            a1.print();
+            a2.print();
+
+            t0.store(&a[j+0,i]);
+            t1.store(&a[j+1,i]);
+            t2.store(&a[j+2,i]);
+            t3.store(&a[j+3,i]);
+            t4.store(&a[j+4,i]);
+            t5.store(&a[j+5,i]);
+            t6.store(&a[j+6,i]);
+            t7.store(&a[j+7,i]);
+
+            t0=_mm256_permute2f128_ps(a0,a4,0x20);
+            t1=_mm256_permute2f128_ps(a1,a5,0x20);
+            t2=_mm256_permute2f128_ps(a2,a6,0x20);
+            t3=_mm256_permute2f128_ps(a3,a7,0x20);
+            t4=_mm256_permute2f128_ps(a0,a4,0x31);
+            t5=_mm256_permute2f128_ps(a1,a5,0x31);
+            t6=_mm256_permute2f128_ps(a2,a6,0x31);
+            t7=_mm256_permute2f128_ps(a3,a7,0x31);
+            
+            a0=_mm256_unpacklo_pd(t0,t2);
+            a1=_mm256_unpacklo_pd(t1,t3);
+            a2=_mm256_unpackhi_pd(t0,t2);
+            a3=_mm256_unpackhi_pd(t1,t3);
+            a4=_mm256_unpacklo_pd(t4,t6);
+            a5=_mm256_unpacklo_pd(t5,t7);
+            a6=_mm256_unpackhi_pd(t4,t6);
+            a7=_mm256_unpackhi_pd(t5,t7);
+
+            a0=_mm256_shuffle_ps(a0,a0,0xd8);
+            a1=_mm256_shuffle_ps(a1,a1,0xd8);
+            a2=_mm256_shuffle_ps(a2,a2,0xd8);
+            a3=_mm256_shuffle_ps(a3,a3,0xd8);
+            a4=_mm256_shuffle_ps(a4,a4,0xd8);
+            a5=_mm256_shuffle_ps(a5,a5,0xd8);
+            a6=_mm256_shuffle_ps(a6,a6,0xd8);
+            a7=_mm256_shuffle_ps(a7,a7,0xd8);
+
+            t0=_mm256_unpacklo_ps(a0,a1);
+            t1=_mm256_unpackhi_ps(a0,a1);
+            t2=_mm256_unpacklo_ps(a2,a3);
+            t3=_mm256_unpackhi_ps(a2,a3);
+            t4=_mm256_unpacklo_ps(a4,a5);
+            t5=_mm256_unpackhi_ps(a4,a5);
+            t6=_mm256_unpacklo_ps(a6,a7);
+            t7=_mm256_unpackhi_ps(a6,a7);
+
+            a.M=N;
+
+            t0.store(&a[i+0,j]);
+            t1.store(&a[i+1,j]);
+            t2.store(&a[i+2,j]);
+            t3.store(&a[i+3,j]);
+            t4.store(&a[i+4,j]);
+            t5.store(&a[i+5,j]);
+            t6.store(&a[i+6,j]);
+            t7.store(&a[i+7,j]);
+
+            puts("*******");
+            t0.print();
+            t1.print();
+        }
+    }
+
+
+    return {t,N,M,n,m};
+}
+
+Mat convert_mem_layout_B(const float*s,float*t,int n,int m)
+{
+    int N=m;
+    int M=(((n+Align_Wide-1)/Align_Wide)|1)*Align_Wide;
+
+    for(int j=0;j<m;j++)
+    {
+        memcpy(t+j*M,s+n*j,n*4);
+        memset(t+j*M+n,0,(M-n)*4);
+    }
+
+    return {t,N,M,m,n};
+}
+
 
 void custom_sgemm_sc(Mat a,Mat b,Mat c)
 {
@@ -286,12 +438,42 @@ void custom_sgemm_sc(Mat a,Mat b,Mat c)
     }
 }
 
+void test()
+{
+    float A[1000];
+    int n=8,m=8;
+    for(int i=0;i<n;i++)
+    {
+        for(int j=0;j<m;j++)
+        {
+            A[i+j*n]=i+j*n;
+        }
+    }
+
+    for(int i=0;i<n;i++)
+    {
+        for(int j=0;j<m;j++)
+            printf("%3.0f ",A[i+j*n]);
+        puts("");
+    }
+
+    printf("<<%d %d>>\n",n,m);
+
+    Mat a=convert_mem_layout_A(A,mem[0],n,m);
+
+    for(int i=0;i<n;i++)
+    {
+        for(int j=0;j<m;j++)
+            printf("%3.0f ",a[i,j]);
+        puts("");
+    }
+}
 
 void custom_sgemm(int M, int K, int N, float* A, float* B, float* C) {
 
+    test();
     Mat a=convert_mem_layout_A(A,mem[0],M,K);
     Mat b=convert_mem_layout_B(B,mem[1],K,N);
     Mat c={C,N,M,N,M};
-
     custom_sgemm_sc(a,b,c);
 }
